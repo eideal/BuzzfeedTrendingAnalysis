@@ -1,0 +1,485 @@
+---
+title: "Buzzfeed Trending Analysis"
+author: "Emma Ideal"
+date: "14 Oct 2015"
+output: html_document
+runtime: shiny
+resource_files:
+- links.txt
+- BFAds.R
+- LIWC_out_analyze.R
+- LIWC_results.csv
+- LIWC_titles.txt
+- BuzzfeedTrendingAnalysis.html
+---
+
+## Introduction
+
+I am a big fan of Buzzfeed, which is a social news and entertainment company known for producing highly viral content on the web. The analysis presented here was inspired by a study done by a team at [Ripenn](http://www.ripenn.com/). Their analysis is described in this [blog article](https://blog.bufferapp.com/the-most-popular-words-in-most-viral-headlines). In my own analysis, I have taken the following steps, which I will work through here:
+
+- Scraped the titles and web links for 764 Buzzfeed trending articles
+- Used the SocialMediaMineR package to obtain each article's # of social media shares, likes, etc.
+- Calculated characteristics about each headline title, e.g. number of chars in the headline, presence of punctuation, presence of a number
+- Calculated and visualized some overall characteristics of the headlines e.g. most common words, most popular two-word and three-word phrases
+- Used the Linguistic Inquiry and Word Count (LIWC) software to analyze headline sentiment
+
+## Data
+
+The Buzzfeed site has a [trending section](http://www.buzzfeed.com/trending) that features the 20 current top-trending posts as well as the 20 top-trending posts of the week. I have written a separate file called **BDAds.R** that runs a function to obtain the trending post titles and their links and append them to a text file. This function was run several times to obtain the statistics that we use for this study. Here is the code in **BDAds.R**:
+
+```{r, eval=FALSE}
+# Create files to write to
+if(!file.exists('titles.txt')){
+        file.create('titles.txt')
+}
+if(!file.exists('links.txt')){
+        file.create('links.txt')
+}
+
+# Write out titles and urls to files
+BF_ads <- function(){
+        library(XML)
+        url <- 'http://www.buzzfeed.com/trending'
+        
+        doc <- htmlParse(url)
+        
+        titles <- xpathSApply(doc, "//div[@class='trending-post-text']//a", xmlValue)
+        
+        # Put in a delimiter for easy parsing later
+        titles <- paste0(titles, ';')
+        links  <- xpathSApply(doc, "//li//a[@class='trending-post-image']", xmlGetAttr, 'href')
+        links  <- paste0('www.buzzfeed.com', links, ';')
+        
+        cat(titles, file='titles.txt', append=T)
+        cat(links,file='links.txt', append=T)
+}
+
+# Run
+BF_ads()
+```
+
+The files **titles.txt** and **links.txt** contain the titles and links for our Buzzfeed posts; however, it is likely that some of these are redundant because when we call the function above, the retrieved articles may overlap a bit with articles retrieved during the last function call. Next, we will parse these text files to create a data frame for analysis, removing any redundancy in the posts we've collected.
+
+## Parsing the Text Files
+
+We can read the lines of our text files and select the unique values:
+
+```{r message=FALSE, warning=FALSE}
+library(dplyr)
+
+# Split the titles using a ; as delimiter
+titles <- readLines('titles.txt') %>% strsplit(';')
+
+# Get rid of leading white-space
+titles <- gsub("^\\s+", "", titles[[1]]) #%>% unique()
+
+# Read links.txt and split on whitespace
+links <- readLines('links.txt') %>% strsplit(';')
+
+# Select unique links
+links <- gsub("^\\s+", "", links[[1]]) #%>% unique()
+```
+
+You can see that I have commented out the **unique()** call. This is because I have found that some articles have their headlines changed! So if we were to call unique(), we would obtain more titles than links (i.e. a unique link points to two different titles, for instance). Therefore, what we'll do is use the link as an identifying index (kind of like a [primary key](http://www.w3schools.com/sql/sql_primarykey.asp) in SQL!) and use it to filter the titles.
+
+```{r}
+# Get the indices for the unique links (the first occurences)
+unique_links <- which(!duplicated(links))
+
+# Filter out the duplicate links
+links  <- links[unique_links]
+
+# Paste 'http://' to the links
+links <- paste0('http://', links)
+
+# Retain only the titles corresponding to the unique link indices
+titles <- titles[unique_links]
+```
+
+We can check to make sure we have the same number of elements in our links and our titles objects:
+
+```{r}
+length(links) == length(titles)
+length(links)
+```
+
+## Compute Headline Characteristics
+
+Now that we have our lists of links and titles, we can compute some characteristics about them. For instance, for each Buzzfeed trending post we can look at:
+
+- number of characters in the headline
+- presence of ! or ? character
+- presence of an isolated numeric, as in "**26** Things You Should..."
+- number of Facebook likes, shares, comments
+
+The function **getData** will compute all these statistics:
+
+```{r message=FALSE}
+getData <- function(link, title){
+        
+        library(SocialMediaMineR)
+        
+        # Number of chars in headline
+        num_chars <- length(strsplit(title, '')[[1]])
+        
+        # Presence of punctuation
+        punc_pres <-  ifelse('?' %in% strsplit(title, '')[[1]] | '!' %in% strsplit(title, '')[[1]], TRUE, FALSE)
+        
+        # Presence of isolated numeric
+        num_pres <- ifelse(grepl('.\\s[0-9]+$', title) | grepl('^[0-9]+\\s.', title) | grepl('.\\s[0-9]+\\s.', title), TRUE, FALSE)
+        
+        # Number of Facebook likes, shares, comments, total hits
+        fb <- get_facebook(link)
+        FB_shares <- fb[1,3]
+        FB_likes  <- fb[1,4]
+        FB_comm   <- fb[1,5]
+        FB_total  <- fb[1,6]
+        
+        c(num_chars, punc_pres, num_pres, FB_shares, FB_likes, FB_comm, FB_total)
+}
+```
+
+We will create a matrix called **statsMat** that will keep track of all the headlines data. We will then convert it into a data frame for analysis.
+
+```{r}
+n_headlines <- length(titles)
+variables <- 8
+names <- c('headline', 'num_chars', 'punc_pres', 'num_pres', 'FB_shares', 'FB_likes', 'FB_comm', 'FB_total')
+
+statsMat <- matrix(nrow=n_headlines, ncol=variables)
+colnames(statsMat) <- names
+
+for (i in 1:n_headlines){
+        statsMat[i,1] <- titles[i]
+        statsMat[i,2:8] <- getData(links[i], titles[i])
+}
+
+# Convert matrix to data frame
+statsDF <- data.frame(statsMat)
+head(statsDF)
+```
+
+We can compute the summary statistics for the number of characters in a headline:
+
+```{r}
+summary(as.numeric(as.character(statsDF$num_chars)))
+```
+
+We can histogram the number of headline characters, **num_chars**:
+
+```{r}
+hist(as.numeric(as.character(statsDF$num_chars)), breaks=8, xlab='# headline characters', main='')
+```
+
+The distribution looks Gaussian, with most headlines hovering around 60 characters. Let's find the percentage of headlines containing a number:
+
+```{r}
+(sum(statsDF$num_pres  == 1)/nrow(statsDF)) *100
+```
+
+Buzzfeed tends to feature many 'listicles', or articles in the form of numbered lists, such as "29 People Who Clearly Do Not Know How Food Works." We can also compute the percentage of headlines where either a '!' or a '?' is present:
+
+```{r}
+(sum(statsDF$punc_pres == 1)/nrow(statsDF)) *100
+```
+
+Below I have embedded a [Shiny](http://shiny.rstudio.com/) application that produces an interactive plot. This plots the number of Facebook comments versus the number of Facebook likes for the 20 headlines with the largest number of total hits on Facebook. You can hover your cursor over each point, and the headline will be displayed below the plot.
+
+```{r, echo=FALSE}
+statsDFcut <- head(statsDF[order(as.numeric(as.character(statsDF$FB_total)), decreasing=T),], 20)
+```
+
+```{r, echo=FALSE, message=FALSE}
+library(shiny)
+library(shinyapps)
+shinyApp(
+        ui <- fluidPage(
+                fluidRow(
+                        column(width = 12,
+                        plotOutput("plot1", height = 350, hover = hoverOpts(id ="plot_hover"))
+        )
+    ),
+                fluidRow(
+                        column(width = 5,
+                        verbatimTextOutput("hover_info")
+        )
+    )
+),
+
+        server <- function(input, output) {
+                output$plot1 <- renderPlot({
+                color <- adjustcolor('darkgreen', alpha.f = 0.6)
+                options(scipen=999999)
+                likes <- as.numeric(as.character(statsDFcut$FB_likes))
+                comm <- as.numeric(as.character(statsDFcut$FB_comm))
+                plot(likes, comm, type='p', xlab='Facebook Likes', ylab='Facebook Comments', pch=19, col = color, xaxp=c(20000, 370000, 10))
+
+    })
+                output$hover_info <- renderPrint({
+                        if(!is.null(input$plot_hover)){
+                                hover=input$plot_hover
+                                   dist=sqrt((hover$x-as.numeric(as.character(statsDFcut$FB_likes)))^2+(hover$y-as.numeric(as.character(statsDFcut$FB_comm)))^2)
+                                   if(min(dist) < 5000){as.character(statsDFcut$headline[which.min(dist)])}
+        }
+    })
+        }#,
+                #options = list(height = 1000, width=600)
+)
+```
+
+## Most Common Headline Words
+
+It will be interesting to find out the most popular words used in our headline samples. We can then work on finding the most common 2-word and 3-word phrases as well as the most popular first headline word. We begin by locating all the unique words found in the headlines.
+
+```{r}
+# Vector to store words
+words <- character()
+for (i in 1:length(titles)){
+        words <- c(words, unlist(strsplit(titles[i], ' ')))
+}
+
+# Remove all non-alphanumeric characters
+words <- gsub('[^[:alnum:] ]', '', words)
+
+# Find unique words so we can record their counts
+unique_words <- unique(words)
+```
+
+Now we create the matrix **countMat** to keep track of each word's counts:
+
+```{r}
+# Matrix for storing word counts
+countMat <- matrix(nrow=length(unique_words), ncol=2)
+countMat[,1] <- unique_words
+countMat[,2] <- 0
+
+# Loop over the words
+for (i in 1:length(words)){
+        w <- which(words[i] == countMat[,1])
+        countMat[w,2] <- as.numeric(countMat[w,2]) + 1
+}
+
+# Convert matrix to a data frame
+countDF <- data.frame(countMat)
+names(countDF) <- c('Word', 'Count')
+
+# Convert the count from a factor variable to numeric
+countDF <- transform(countDF, Count = as.numeric(as.character(Count)))
+
+# Decreasing order of counts
+countDF <- countDF[order(countDF$Count, countDF$Word, decreasing=TRUE),]
+```
+
+Let's look at the top 10 most common words seen in viral headlines:
+
+```{r}
+head(countDF, 10)
+```
+
+It is certainly interesting that we find "you" and "your" in this list. This reflects the idea that posts written about the *reader* as opposed to the *writer* are more interesting to the reader! Who doesn't like to think about themselves?
+
+## Most Common Headline Phrases
+
+We can also find the most common two-word, three-word, and four-word phrases in our headline samples. To do this, we will use the function **phraseCount**:
+
+```{r}
+phraseCount <- function(uniques, allphrases){
+        # Matrix for storing phrase counts
+        phraseMat <- matrix(nrow=length(uniques), ncol=2)
+        phraseMat[,1] <- uniques
+        phraseMat[,2] <- 0
+
+        # Loop over the phrases
+        for (i in 1:length(allphrases)){
+                w <- which(allphrases[i] == phraseMat[,1])
+                phraseMat[w,2] <- as.numeric(phraseMat[w,2]) + 1
+        }
+
+        # Convert matrix to a data frame
+        phraseDF <- data.frame(phraseMat)
+        names(phraseDF) <- c('Phrase', 'Count')
+
+        # Convert the count to numeric
+        phraseDF <- transform(phraseDF, Count = as.numeric(as.character(Count)))
+
+        # Return in decreasing order of counts
+        phraseDF[order(phraseDF$Count, phraseDF$Phrase, decreasing=TRUE),]
+}
+```
+
+This function will return a data frame with two columns; the first column shows the phrase, and the second column shows its count. The returned data frame will be ordered by decreasing order of counts, so when we print the head of the data frame, we will see the phrases will the largest number of counts.
+
+In order to find the most common two-word phrases, we first loop through the headlines and find all unique two-word strings.
+
+```{r}
+# This vector will store all two-word phrases (not only uniques)
+two_word <- character()
+for (i in 1:length(titles)){
+        words <- unlist(strsplit(titles[i], ' '))
+        words <- gsub('[^[:alnum:] ]', '', words)
+        for (j in 1:(length(words)-1)){
+                phrase <- paste(words[j], words[j+1])
+                two_word <- c(two_word, phrase)
+        }
+}
+
+# Store the unique 2-word phrases
+two_word_unique <- unique(two_word)
+```
+
+Now we will count the number of times each two-word phrase appears in our headlines using the **phraseCount** function above:
+
+```{r}
+two_wordDF <- phraseCount(two_word_unique, two_word)
+```
+
+Great! Now let's print the top 10 most common two-word phrases in our headlines:
+
+```{r}
+head(two_wordDF, 10)
+```
+
+Well, I am a bit curious now to see the most common three-word phrases! Let's us a similar procedure to figure these out:
+
+```{r}
+three_word <- character()
+for (i in 1:length(titles)){
+        words <- unlist(strsplit(titles[i], ' '))
+        words <- gsub('[^[:alnum:] ]', '', words)
+        for (j in 1:(length(words)-2)){
+                phrase <- paste(words[j], words[j+1], words[j+2])
+                three_word <- c(three_word, phrase)
+        }
+}
+
+# Take the unique 2-word phrases
+three_word_unique <- unique(three_word)
+```
+
+Just as we did for two-word phrases, we count up the number of times each three-word phrase appears in the headlines.
+
+```{r}
+three_wordDF <- phraseCount(three_word_unique, three_word)
+```
+
+The top 10 most used three-word phrases are:
+
+```{r}
+head(three_wordDF, 10)
+```
+
+Okay, well while we're at it, let's find the most popular four-word phrases!
+
+```{r}
+four_word <- character()
+for (i in 1:length(titles)){
+        words <- unlist(strsplit(titles[i], ' '))
+        words <- gsub('[^[:alnum:] ]', '', words)
+        for (j in 1:(length(words)-3)){
+                phrase <- paste(words[j], words[j+1], words[j+2], words[j+3])
+                four_word <- c(four_word, phrase)
+        }
+}
+
+# Take the unique 2-word phrases
+four_word_unique <- unique(four_word)
+
+# Count the occurrences
+four_wordDF <- phraseCount(four_word_unique, four_word)
+```
+
+The most commonly-used four-word strings in our headlines are:
+
+```{r}
+head(four_wordDF, 10)
+```
+
+
+## Linguistic Inquiry and Word Count (LIWC) Text Analysis
+
+The [LIWC](www.liwc.net) is a powerful text analysis tool that takes a piece of text and computes the percentage of words that reflect emotional affect or various social and cognitive ways of thinking. The meat of the LIWC program is in its dictionaries, which contain over 6000 words categorized in various dimensions. An example (given on their webpage) is the following: the word "cried" is categorized as: sadness, negative emotion, overall affect, verb, and past focus.
+
+We can use the LIWC dictionaries here to analyze our sample of Buzzfeed's viral headlines.
+
+```{r, eval=FALSE, echo=FALSE, results='hide'}
+library(dplyr)
+
+# Split the titles using a ; as delimiter, get rid of leading white-space
+titles <- readLines('titles.txt') %>% strsplit(';')
+titles <- gsub("^\\s+", "", titles[[1]])
+
+# Read links.txt, split on whitespace
+links <- readLines('links.txt') %>% strsplit(';')
+links <- gsub("^\\s+", "", links[[1]])
+
+# Get the indices for the unique links (the first occurences)
+unique_links <- which(!duplicated(links))
+
+# Retain only the titles corresponding to the unique link indices
+titles <- titles[unique_links]
+
+########################
+
+# File to be analyzed by LIWC
+file.create('LIWC_titles.txt')
+
+for (i in 1:length(titles)){
+        cat(paste0(titles[i], ';'), file='LIWC_titles.txt', append=T)
+}
+```
+
+
+```{r, results='hide', echo=FALSE}
+liwc_data <- read.csv('LIWC_results.csv')
+names(liwc_data)
+```
+
+```{r, message=FALSE, echo=FALSE, results='hide'}
+liwc_data <- cbind(headline = titles, select(liwc_data, -(Filename:Segment)))
+```
+
+There is a lot of analysis you can do with this data. For instance, we can make [radar charts](http://www.inside-r.org/packages/cran/fmsb/docs/radarchart), which display the extent to which these headlines exhibit certain LIWC dimensions. Here we will profile our headlines using the following groups of dimensions:
+
+- i, we, you, shehe, they   
+- posemo, negemo, anx, anger, sad   
+- focuspast, focuspresent, focusfuture   
+
+For each of these three radarcharts, we average the headline's word frequencies over all headlines. The maximum value assumed in the radar chart will be the maximum average value in that particular group. Comparisons can then be made between the elements in each group. 
+
+```{r, message=FALSE, echo=FALSE}
+library(fmsb)
+par(mar=c(1, 1, 1, 1),mfrow=c(2, 2))
+
+# Create new data frame with columns of interest
+cutdata <- liwc_data[, c(1:2, 13:17, 32:36, 64:66)]
+
+# Rewrite the data to be the word count in the headline, e.g. # of "you"-type words in that headline or the # of "posemo" words in that headline, etc
+for (row in 1:nrow(cutdata)){
+        for(i in 3:ncol(cutdata)){
+                cutdata[row,i] <- (cutdata[row,i])*cutdata$WC[row]/100
+        }
+}
+# Compute the mean for each column
+cutdata <- data.frame(t(data.frame(sapply(cutdata[,3:ncol(cutdata)], mean))))
+
+# Create row 1 and row 2 of the data frame to be the maxmin for radarcharts
+max_pron  <- max(cutdata[,1:5])
+max_aff   <- max(cutdata[,6:10])
+max_focus <- max(cutdata[,11:13])
+cutdata <- data.frame(rbind(c(rep(max_pron, 5), rep(max_aff, 5), rep(max_focus, 3)), c(rep(0, 13)), cutdata))
+
+# Plot the radarcharts
+radarchart(cutdata[,6:10],  axistype=0, maxmin=TRUE)
+radarchart(cutdata[,1:5],   axistype=0, maxmin=TRUE)
+radarchart(cutdata[,11:13], axistype=0, maxmin=TRUE)
+```
+
+The plot in the upper left indicates a slightly larger presence of words evoking position emotion compared to negative emotion. The plot in the upper right indicates that headlines tend to be reader-focused as opposed to writer-focused. The average headline contains more than four times as many "you"-type pronouns than "we"-type pronouns (e.g. "Are **You** A Bagel Or A Doughnut?"). As well, the plot in the lower left tells us that verbs tend to be in the present tense. An example of this present focus is the headline "21 New Words Every Aussie Needs To Learn." The sense of urgency conveyed in headlines like this one may contribute to the virality of these Buzzfeed posts.
+
+## Final Remarks
+
+This analysis was a quick look into the nature of Buzzfeed's trending headlines. The fact that the company has nailed down what it takes to make a post viral means they have the power to do a lot of social good; I think they use it. 
+
+I would be curious to do a study on their readership demographics since I can imagine that virality is dependent on how targeted the post is toward a certain demographic (e.g. age, ethnicity, gender). One can hypothesize that those posts that appeal to a wider audience obtain more attention on social media. I would also be curious to look at a variable like the ratio of words to images in viral posts. My hypothesis is that readers prefer posts containing many images for at least a couple reasons: they're faster for readers to process compared to reading words (less effort for the same information), and it's [the way we're wired](http://www.shutterstock.com/blog/why-we-prefer-pictures-its-the-way-that-youre-wired). 
+
+There are many different ways we could approach this data and glean interesting information from it. Buzzfeed data scientists must love their jobs!

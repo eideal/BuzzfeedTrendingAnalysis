@@ -1,0 +1,20 @@
+README for the Buzzfeed Trending Analysis
+
+----
+Main Output
+----
+
+The output includes a Shiny application, so the final document has been published on shinyapps.io (takes a bit of time to load): https://eideal.shinyapps.io/BuzzfeedTrendingAnalysis.
+
+
+-----
+Files
+-----
+
+BFAds.R : script for generating new Buzzfeed links (saved to links.txt) and titles (saved to titles.txt). This script only appends to these txt files, therefore, there may be repeat links and titles. These are filtered later for unique values.
+
+BuzzfeedTrendingAnalysis2.Rmd : contains all the code, explanatory text, and visualizations
+
+links.txt : a file containing all the links obtained from running BFAds.R. This file contains *all* links ever obtained from Buzzfeed Trending - they are not unique.
+
+titles.txt : a file containing all the Buzzfeed headlines obtained from running BFAds.R. This files contains *all* headlines ever obtained from Buzzfeed Trending - they are not unique.
